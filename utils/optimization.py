@@ -27,6 +27,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import pulp
+import gc
 
 from utils.macro import MacroRates
 
@@ -105,8 +106,9 @@ def simulate_annual_revenue(
     df_out['Receita Anual p75']     = np.nanpercentile(revenue_matrix, 75, axis=1)
     df_out['Receita Anual p95']     = np.nanpercentile(revenue_matrix, 95, axis=1)
 
-    # Preservar a matriz para análise de distribuições individuais no notebook
-    df_out.attrs['revenue_matrix'] = revenue_matrix
+    # Liberação de memória pesada (matriz de N_imóveis x N_simulações)
+    del revenue_matrix
+    gc.collect()
 
     print(f"  Simulacao Monte Carlo concluida: {len(df_out)} imoveis x {n_simulations} simulacoes")
     return df_out
@@ -258,6 +260,6 @@ def optimize_portfolio(
         'custo_total': custo_total,
         'retorno_total_esperado': retorno_total,
         'df_portfolio': df_opt.loc[imoveis_selecionados, portfolio_cols] if imoveis_selecionados else pd.DataFrame(),
-        'df_opt': df_opt,
+        'df_opt': None,  # Liberando memória para não poluir o session_state da interface
         'macro_rates': macro_rates,
     }

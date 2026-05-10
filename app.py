@@ -15,6 +15,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 import cloudpickle as pickle
+import gc
 
 # ── paths ──────────────────────────────────────────────────────────────────────
 ROOT      = os.path.dirname(os.path.abspath(__file__))
@@ -70,7 +71,7 @@ st.markdown("""
 # CACHE: carrega artefatos pesados apenas uma vez por sessão
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_resource(show_spinner="Carregando modelos…")
+@st.cache_resource(show_spinner="Carregando modelos…", max_entries=1)
 def load_models():
     def _pkl(name):
         with open(os.path.join(PATH_MOD, name), "rb") as f:
@@ -82,18 +83,38 @@ def load_models():
     }
 
 
-@st.cache_data(show_spinner="Carregando base QuintoAndar…")
+@st.cache_data(show_spinner="Carregando base QuintoAndar…", max_entries=1, ttl=3600)
 def load_base():
-    return pd.read_csv(
+    df = pd.read_csv(
         os.path.join(PATH_DATA, "base_features_quintoAndar.csv"), index_col=0
     )
+    
+    # --- DOWNCASTING PARA OTIMIZAÇÃO DE MEMÓRIA ---
+    # 1. Converter float64 para float32
+    float_cols = df.select_dtypes(include=['float64']).columns
+    df[float_cols] = df[float_cols].astype('float32')
+    
+    # 2. Converter int64 para int32
+    int_cols = df.select_dtypes(include=['int64']).columns
+    df[int_cols] = df[int_cols].astype('int32')
+    
+    # 3. Converter colunas textuais mais frequentes para categóricas
+    cat_cols = ['Bairro', 'city', 'neighborhood', 'type', 'Logradouro', 'quadrante']
+    for col in cat_cols:
+        if col in df.columns:
+            df[col] = df[col].astype('category')
+            
+    # Força a coleta de lixo
+    gc.collect()
+    
+    return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PIPELINE DE PREDIÇÃO (preços + dias alugados)
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(show_spinner="Estimando aluguéis e ocupação…", ttl=3600)
+@st.cache_data(show_spinner="Estimando aluguéis e ocupação…", ttl=3600, max_entries=1)
 def build_enriched_base(_pipeline, _price_model, _disp_model):
     """
     Aplica pipeline + modelos na base QuintoAndar.
@@ -120,6 +141,11 @@ def build_enriched_base(_pipeline, _price_model, _disp_model):
         warnings.simplefilter("ignore")
         dias = np.clip(_disp_model.predict(X_disp), 0, 365)
     df["Dias Alugados Estimado"] = dias
+    
+    # Liberar memória dos objetos temporários
+    del df_scaled, df_proc, derived, X_disp, y_log
+    gc.collect()
+    
     return df
 
 
@@ -260,9 +286,14 @@ if run_btn:
             gap_rel=0.01,
             macro_rates=macro,
         )
+    
     st.session_state["resultado"] = resultado
     st.session_state["orcamento"] = orcamento
     st.session_state["macro"]     = macro
+    
+    # Forçar a limpeza de memória após o término da otimização pesada
+    del df_sim
+    gc.collect()
 
 # ── exibir resultado ──────────────────────────────────────────────────────────
 if "resultado" in st.session_state:
