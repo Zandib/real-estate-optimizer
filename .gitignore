@@ -1,0 +1,16 @@
+# Ambientes Virtuais
+.venv/
+venv/
+
+# Pastas de trabalho específicas (Colabs)
+/colabs/
+
+# Python cache (ignora em qualquer nível de diretório)
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Arquivos de sistema e IDE (opcional, mas recomendado)
+.DS_Store
+.vscode/
+.idea/
