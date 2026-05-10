@@ -1,0 +1,16 @@
+status,Optimal
+n_imoveis_selecionados,25
+custo_total,9999800.0
+retorno_total_esperado,18837983.64925864
+orcamento,10000000
+peso_p5,0.3
+peso_media,0.5
+peso_p95,0.2
+macro_fonte,fallback_hardcoded
+selic_anual,0.1425
+ipca_anual,0.051
+spread_imovel,0.025
+taxa_desconto_nominal,0.16749999999999998
+taxa_desconto_real,0.11084681255946727
+fator_vp,11.340976888177805
+horizonte_meses,12
