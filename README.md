@@ -57,7 +57,7 @@ $$ i_{\text{mês}} = (1 + i_{\text{real}})^{\frac{1}{12}} - 1 $$
 
 O fluxo de locação do imóvel é contínuo ao longo dos meses. Para trazer os $T$ meses ao Valor Presente (ex: horizonte $T=12$ meses), calculamos o fator de valor presente de uma anuidade padrão:
 
-$$ \text{FATOR\_VP} = \frac{1 - (1 + i_{\text{mês}})^{-T}}{i_{\text{mês}}} $$
+$$ \text{FatorVP} = \frac{1 - (1 + i_{\text{mês}})^{-T}}{i_{\text{mês}}} $$
 
 ### 2. Função Objetivo e Risco Ajustado (Monte Carlo)
 A partir das simulações estatísticas do tempo de locação e dos aluguéis previstos, o algoritmo extrai percentis de lucro de cada imóvel $i$: o pessimista ($p5$), a média estatística, e o otimista ($p95$). 
@@ -69,7 +69,7 @@ $$\text{Onde:} \quad w_{\text{p5}} + w_{\text{média}} + w_{\text{p95}} = 1 $$
 
 Isso é descontado no tempo, gerando o **Valor Presente Líquido (VPL)** escalar para preservação de linearidade:
 
-$$ VPL_i = R_i \times \text{FATOR\_VP} $$
+$$ VPL_i = R_i \times \text{FatorVP} $$
 
 O **Problema de Otimização Combinatória (Knapsack Problem Expandido)** busca maximizar a soma do VPL dos imóveis comprados:
 
