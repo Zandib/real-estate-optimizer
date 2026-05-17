@@ -174,11 +174,14 @@ def optimize_portfolio(
         dict com:
             - 'status': status da otimização ('Optimal', 'Feasible', etc.)
             - 'imoveis_selecionados': lista de índices dos imóveis comprados
-            - 'custo_total': soma dos valores de venda dos imóveis selecionados
-            - 'retorno_total_esperado': soma dos coeficientes objetivo dos selecionados
-                                        (retorno bruto se macro_rates=None, VPL caso contrário)
+            - 'custo_imoveis': custo total dos imóveis selecionados (R$)
+            - 'v_selic_alocado': capital destinado à Selic (R$); quando macro_rates
+                                 está ativo, equivale a budget − custo_imoveis.
+            - 'retorno_imoveis': soma dos coeficientes VPL dos imóveis selecionados
+            - 'retorno_selic': retorno anual projetado da parcela Selic (R$)
+            - 'retorno_total_esperado': retorno_imoveis + retorno_selic
             - 'df_portfolio': DataFrame filtrado com os imóveis selecionados
-            - 'df_opt': DataFrame completo usado na otimização
+            - 'df_opt': None (liberado para poupar memória)
             - 'macro_rates': MacroRates utilizado (ou None)
     """
     assert abs(peso_p5 + peso_media + peso_p95 - 1.0) < 1e-6, \
@@ -197,23 +200,38 @@ def optimize_portfolio(
     )
 
     # ------------------------------------------------------------------
-    # Desconto macroeconômico — VPL (Valor Presente Líquido)
+    # Coeficiente da Função Objetivo — Homogeneização de Unidades
     # ------------------------------------------------------------------
-    # Quando macro_rates é fornecido, o coeficiente da função objetivo PuLP
-    # passa a ser o VPL do fluxo de aluguel descontado pela taxa real:
-    #   VPL[i] = Retorno_Ajustado[i] × FATOR_VP
+    # PROBLEMA ANTERIOR: VPL[i] = Retorno_Ajustado[i] × fator_vp
+    #   Para 12 meses a 11% real: fator_vp ≈ 11,3 (anuidade mensal)
+    #   Isso amplia o retorno do imóvel em ~11x, enquanto a Selic usa
+    #   selic_anual ≈ 0,1425 — bases completamente diferentes.
+    #   Resultado: imóveis sempre vencem, independente do yield real.
     #
-    # O FATOR_VP é < 1 quando a taxa real > 0, refletindo o custo de oportunidade
-    # do capital e a erosão pelo IPCA. Como é um escalar pré-calculado por imóvel,
-    # a linearidade do MIP é preservada.
+    # CORREÇÃO: ambos os ativos competem na mesma base anual (R$/ano).
+    #   Imóvel i vence a Selic se e somente se:
+    #       Retorno_Ajustado[i] / Custo[i]  >  selic_anual
+    #   O VPL continua sendo calculado como KPI de exibição.
     # ------------------------------------------------------------------
     if macro_rates is not None:
+        # VPL para exibição e KPI — não entra na FO (evita mismatch)
         df_opt['VPL Estimado'] = df_opt['Retorno Esperado Ajustado'] * macro_rates.fator_vp
-        coeficiente_objetivo   = 'VPL Estimado'
-        modo_objetivo          = f"VPL (i_real={macro_rates.taxa_desconto_real:.2%}, FatorVP={macro_rates.fator_vp:.4f})"
+
+        # Diagnóstico: quantos imóveis superam a Selic?
+        yields_prop  = df_opt['Retorno Esperado Ajustado'] / df_opt[sale_col]
+        n_acima      = (yields_prop > macro_rates.selic_anual).sum()
+        print(f"  Custo de oportunidade: Selic={macro_rates.selic_anual:.2%} a.a.")
+        print(f"  Imóveis com yield > Selic: {n_acima}/{len(df_opt)}")
+        print(f"  Yield médio candidatos:    {yields_prop.mean():.2%} a.a.")
+
+        coeficiente_objetivo = 'Retorno Esperado Ajustado'
+        modo_objetivo = (
+            f"Retorno Anual Bruto vs. Selic ({macro_rates.selic_anual:.2%} a.a.) "
+            f"| VPL exib.: FV={macro_rates.fator_vp:.4f}"
+        )
     else:
-        coeficiente_objetivo   = 'Retorno Esperado Ajustado'
-        modo_objetivo          = "Retorno Bruto Anual (sem desconto)"
+        coeficiente_objetivo = 'Retorno Esperado Ajustado'
+        modo_objetivo        = "Retorno Bruto Anual (sem desconto)"
 
     imoveis_ids = df_opt.index.tolist()
     custos   = df_opt[sale_col].to_dict()
@@ -222,12 +240,40 @@ def optimize_portfolio(
     print(f"  Iniciando otimizacao MIP para {len(imoveis_ids)} imoveis candidatos...")
     print(f"  Modo objetivo: {modo_objetivo}")
 
-    # Definir e resolver o problema MIP
+    # ------------------------------------------------------------------
+    # Ativo livre de risco: Selic como alternativa de alocação
+    # ------------------------------------------------------------------
+    # Quando macro_rates está ativo, v_selic é uma variável contínua que
+    # representa o montante alocado em renda fixa (Selic). Como seu
+    # coeficiente na FO (selic_anual) é positivo, o solver sempre a
+    # satura ao máximo permitido pela restrição orçamentária — garantindo
+    # que 100% do capital seja alocado: v_selic = budget − Σcusto·x.
+    # O modelo é livre para colocar 0% em imóveis se a Selic superar
+    # o VPL de todos os candidatos.
+    # ------------------------------------------------------------------
+    use_selic_asset = macro_rates is not None
+
     prob = pulp.LpProblem("Otimizacao_Portfolio_Imoveis", pulp.LpMaximize)
     x = pulp.LpVariable.dicts("comprar", imoveis_ids, cat='Binary')
 
-    prob += pulp.lpSum([retornos[i] * x[i] for i in imoveis_ids]), "Max_Retorno_Objetivo"
-    prob += pulp.lpSum([custos[i]   * x[i] for i in imoveis_ids]) <= budget, "Restricao_Orcamento"
+    if use_selic_asset:
+        selic_coef = macro_rates.selic_anual   # retorno anual por R$ na Selic
+        v_selic    = pulp.LpVariable("v_selic", lowBound=0, cat="Continuous")
+
+        # FO: max Σ VPL[i]·x[i] + v_selic · selic_anual
+        prob += (
+            pulp.lpSum([retornos[i] * x[i] for i in imoveis_ids])
+            + v_selic * selic_coef
+        ), "Max_Retorno_Total"
+
+        # Restrição: imóveis + Selic ≤ orçamento
+        prob += (
+            pulp.lpSum([custos[i] * x[i] for i in imoveis_ids]) + v_selic <= budget
+        ), "Restricao_Orcamento"
+    else:
+        v_selic = None
+        prob += pulp.lpSum([retornos[i] * x[i] for i in imoveis_ids]), "Max_Retorno_Objetivo"
+        prob += pulp.lpSum([custos[i]   * x[i] for i in imoveis_ids]) <= budget, "Restricao_Orcamento"
 
     solver = pulp.PULP_CBC_CMD(msg=False, timeLimit=time_limit_seconds, gapRel=gap_rel)
     prob.solve(solver)
@@ -235,31 +281,49 @@ def optimize_portfolio(
     status = pulp.LpStatus[prob.status]
     print(f"  Status da otimizacao: {status}")
 
-    # Extrair solução
+    # ── Extrair solução imobiliária ────────────────────────────────────
     imoveis_selecionados = [i for i in imoveis_ids if x[i].varValue == 1.0]
-    custo_total           = sum(custos[i] for i in imoveis_selecionados)
-    retorno_total         = sum(retornos[i] for i in imoveis_selecionados)
+    custo_imoveis   = sum(custos[i]   for i in imoveis_selecionados)
+    retorno_imoveis = sum(retornos[i] for i in imoveis_selecionados)
+
+    # ── Extrair alocação Selic ─────────────────────────────────────────
+    # Todo capital não alocado em imóveis é considerado investido na Selic.
+    if use_selic_asset:
+        v_selic_alocado = float(v_selic.varValue or 0.0)
+        retorno_selic   = v_selic_alocado * selic_coef
+    else:
+        v_selic_alocado = budget - custo_imoveis  # residual (sem rentabilização)
+        retorno_selic   = 0.0
+
+    retorno_total = retorno_imoveis + retorno_selic
 
     print(f"  Imoveis selecionados: {len(imoveis_selecionados)}")
-    print(f"  Investimento total:   R$ {custo_total:,.2f} (orcamento: R$ {budget:,.2f})")
-    print(f"  Retorno anual esperado: R$ {retorno_total:,.2f}")
+    print(f"  Custo imoveis:        R$ {custo_imoveis:,.2f}")
+    print(f"  Alocado na Selic:     R$ {v_selic_alocado:,.2f}")
+    print(f"  Retorno imoveis:      R$ {retorno_imoveis:,.2f}")
+    print(f"  Retorno Selic:        R$ {retorno_selic:,.2f}")
+    print(f"  Retorno TOTAL:        R$ {retorno_total:,.2f}  |  orcamento: R$ {budget:,.2f}")
 
-    # Marcar imóveis selecionados (permite salvar todos os candidatos num único CSV)
     df_opt['Selecionado'] = df_opt.index.isin(imoveis_selecionados)
 
     portfolio_cols = [
         c for c in ['url', 'Bairro', sale_col,
                     'Receita Anual p5', 'Receita Anual Media', 'Receita Anual p95',
+                    'Receita Anual Std',
                     'Retorno Esperado Ajustado', 'VPL Estimado']
         if c in df_opt.columns
     ]
 
     return {
-        'status': status,
-        'imoveis_selecionados': imoveis_selecionados,
-        'custo_total': custo_total,
+        'status':                 status,
+        'imoveis_selecionados':   imoveis_selecionados,
+        'custo_imoveis':          custo_imoveis,
+        'custo_total':            custo_imoveis,          # alias retrocompat.
+        'v_selic_alocado':        v_selic_alocado,
+        'retorno_imoveis':        retorno_imoveis,
+        'retorno_selic':          retorno_selic,
         'retorno_total_esperado': retorno_total,
         'df_portfolio': df_opt.loc[imoveis_selecionados, portfolio_cols] if imoveis_selecionados else pd.DataFrame(),
-        'df_opt': None,  # Liberando memória para não poluir o session_state da interface
-        'macro_rates': macro_rates,
+        'df_opt':        None,
+        'macro_rates':   macro_rates,
     }

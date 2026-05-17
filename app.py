@@ -26,6 +26,7 @@ sys.path.insert(0, ROOT)
 from utils.optimization import simulate_annual_revenue, optimize_portfolio
 from utils.modeling      import create_target_derived_features
 from utils.macro         import MacroRates, fetch_macro_rates
+from utils.visualization import plot_montecarlo_distribution, plot_asset_allocation
 
 # ── page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -302,16 +303,20 @@ if "resultado" in st.session_state:
     mac  = st.session_state["macro"]
     df_p = res["df_portfolio"]
 
-    custo     = res["custo_total"]
-    retorno   = res["retorno_total_esperado"]
-    n_imoveis = len(res["imoveis_selecionados"])
-    caixa     = orc - custo
-    yld_anual = (retorno / mac.fator_vp) / custo if custo > 0 else 0
-    status    = res["status"]
+    custo_imoveis  = res.get("custo_imoveis", res.get("custo_total", 0))
+    v_selic_aloc   = res.get("v_selic_alocado", orc - custo_imoveis)
+    retorno_imov   = res.get("retorno_imoveis", res["retorno_total_esperado"])
+    retorno_sel    = res.get("retorno_selic", 0.0)
+    retorno        = res["retorno_total_esperado"]
+    n_imoveis      = len(res["imoveis_selecionados"])
+    status         = res["status"]
+
+    # Yield anual sobre a parcela imobiliária (retorno_imov já é base anual)
+    yld_anual = retorno_imov / custo_imoveis if custo_imoveis > 0 else 0
 
     # ── métricas de topo ─────────────────────────────────────────────────────
     st.markdown("### 📌 Resumo do Portfólio Ótimo")
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     _status_color = "#3fb950" if status == "Optimal" else "#ffa657"
 
     def _card(col, label, value, delta="", delta_cls="neu"):
@@ -325,12 +330,17 @@ if "resultado" in st.session_state:
     _card(c1, "Status MIP",       status,
           delta_cls="pos" if status == "Optimal" else "neg")
     _card(c2, "Imóveis",          n_imoveis)
-    _card(c3, "Investido",        f"R$ {custo/1e6:.2f}M",
-          f"{custo/orc:.1%} do orçamento", "pos" if custo > 0 else "neg")
-    _card(c4, "Retorno Esperado (VPL)", f"R$ {retorno/1e6:.2f}M",
-          f"Yield anual: {yld_anual:.1%}", "pos" if yld_anual > mac.selic_anual else "neg")
-    _card(c5, "Capital em Caixa", f"R$ {caixa/1e6:.2f}M",
-          f"{caixa/orc:.1%} não investido", "neu")
+    _card(c3, "Investido (Imóveis)", f"R$ {custo_imoveis/1e6:.2f}M",
+          f"{custo_imoveis/orc:.1%} do orçamento", "pos" if custo_imoveis > 0 else "neg")
+    _card(c4, "Alocado na Selic",  f"R$ {v_selic_aloc/1e6:.2f}M",
+          f"{v_selic_aloc/orc:.1%} do orçamento", "neu")
+    _card(c5, "Retorno Imóveis (VPL)", f"R$ {retorno_imov/1e6:.2f}M",
+          f"Yield: {yld_anual:.1%}", "pos" if yld_anual > mac.selic_anual else "neg")
+    _card(c6, "Retorno Selic",     f"R$ {retorno_sel/1e6:.2f}M",
+          f"Taxa: {mac.selic_anual:.2%} a.a.", "neu")
+    _card(c7, "Retorno TOTAL",     f"R$ {retorno/1e6:.2f}M",
+          f"vs. 100% Selic: R$ {orc*mac.selic_anual/1e6:.2f}M",
+          "pos" if retorno > orc * mac.selic_anual else "neg")
 
     st.markdown("---")
 
@@ -366,30 +376,42 @@ if "resultado" in st.session_state:
     st.markdown("### 📈 Análise Visual")
     tab1, tab2, tab3 = st.tabs(["Distribuição de Retornos", "Yield vs Selic", "Alocação"])
 
-    # TAB 1: box plot p5/média/p95 por imóvel
+    # TAB 1: KDE Monte Carlo (distribuição do portfólio) + barras p5/média/p95
     with tab1:
         if not df_p.empty and {"Receita Anual p5","Receita Anual Media","Receita Anual p95"} <= set(df_p.columns):
-            idx_label = df_p.get("Bairro", df_p.index.astype(str))
-            fig1 = go.Figure()
-            for col, name, color in [
-                ("Receita Anual p5",   "P5 (pessimista)", "#e9c46a"),
-                ("Receita Anual Media","Média",           "#2a9d8f"),
-                ("Receita Anual p95",  "P95 (otimista)",  "#3fb950"),
-            ]:
-                if col in df_p.columns:
-                    fig1.add_trace(go.Bar(
-                        name=name, x=idx_label.values, y=df_p[col].values / 1e3,
-                        marker_color=color,
-                    ))
-            fig1.update_layout(
-                barmode="group", template="plotly_dark",
-                paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
-                title="Receita Anual por Imóvel — Cenários Monte Carlo (R$ mil)",
-                yaxis_title="R$ mil / ano", xaxis_tickangle=-40,
-                legend=dict(orientation="h", y=1.1),
-                margin=dict(t=60, b=100),
+
+            # ── Gráfico principal: distribuição KDE Monte Carlo ──────────────────
+            fig_kde = plot_montecarlo_distribution(
+                df_portfolio=df_p,
+                selic_anual=mac.selic_anual,
+                budget=custo_imoveis if custo_imoveis > 0 else None,
             )
-            st.plotly_chart(fig1, width='stretch')
+            st.plotly_chart(fig_kde, width="stretch")
+            del fig_kde  # libera objeto após renderização
+
+            # ── Detalhe por imóvel (colapsável) ───────────────────────────────────
+            with st.expander("🔍 Detalhe por imóvel — Receita Anual P5 / Média / P95"):
+                idx_label = df_p.get("Bairro", df_p.index.astype(str))
+                fig1 = go.Figure()
+                for col, name, color in [
+                    ("Receita Anual p5",   "P5 (pessimista)", "#e9c46a"),
+                    ("Receita Anual Media","Média",           "#2a9d8f"),
+                    ("Receita Anual p95",  "P95 (otimista)",  "#3fb950"),
+                ]:
+                    if col in df_p.columns:
+                        fig1.add_trace(go.Bar(
+                            name=name, x=idx_label.values, y=df_p[col].values / 1e3,
+                            marker_color=color,
+                        ))
+                fig1.update_layout(
+                    barmode="group", template="plotly_dark",
+                    paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
+                    title="Receita Anual por Imóvel — Cenários Monte Carlo (R$ mil)",
+                    yaxis_title="R$ mil / ano", xaxis_tickangle=-40,
+                    legend=dict(orientation="h", y=1.1),
+                    margin=dict(t=60, b=100),
+                )
+                st.plotly_chart(fig1, width="stretch")
 
     # TAB 2: yield por imóvel vs Selic
     with tab2:
@@ -405,9 +427,10 @@ if "resultado" in st.session_state:
                 text=[f"{v:.1%}" for v in yields.values],
                 textposition="outside",
             ))
+            # Linha Selic
             fig2.add_vline(
                 x=mac.selic_anual * 100, line_dash="dash",
-                line_color="#4361ee", annotation_text=f"Selic {mac.selic_anual:.2%}",
+                line_color="#4361ee", annotation_text=f"Selic {mac.selic_anual:.2%} — custo de oportunidade",
                 annotation_font_color="#4361ee",
             )
             fig2.update_layout(
@@ -420,27 +443,35 @@ if "resultado" in st.session_state:
             )
             st.plotly_chart(fig2, width='stretch')
 
-    # TAB 3: pizza de alocação
+    # TAB 3: alocação Waterfall + Retorno por Classe
     with tab3:
-        fig3 = go.Figure(go.Pie(
-            labels=["Investido em imóveis", "Capital em caixa"],
-            values=[custo, caixa],
-            hole=0.55,
-            marker_colors=["#2a9d8f", "#e9c46a"],
-            textinfo="label+percent",
-            textfont_size=13,
-        ))
-        fig3.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="#0d1117",
-            title=f"Alocação do Orçamento — R$ {orc/1e6:.1f} MM",
-            annotations=[dict(
-                text=f"R$ {custo/1e6:.2f}M<br>investido",
-                x=0.5, y=0.5, font_size=14, showarrow=False,
-                font_color="#c9d1d9",
-            )],
-        )
-        st.plotly_chart(fig3, width='stretch')
+        if mac is not None and mac.selic_anual > 0:
+            fig3 = plot_asset_allocation(
+                budget=orc,
+                custo_imoveis=custo_imoveis,
+                v_selic=v_selic_aloc,
+                retorno_imoveis=retorno_imov,
+                retorno_selic=retorno_sel,
+                selic_anual=mac.selic_anual,
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+            del fig3
+        else:
+            # Fallback: pizza simples quando macro não está ativo
+            fig3 = go.Figure(go.Pie(
+                labels=["Investido em imóveis", "Não alocado"],
+                values=[custo_imoveis, orc - custo_imoveis],
+                hole=0.55,
+                marker_colors=["#2a9d8f", "#e9c46a"],
+                textinfo="label+percent",
+                textfont_size=13,
+            ))
+            fig3.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="#0d1117",
+                title=f"Alocação do Orçamento — R$ {orc/1e6:.1f} MM",
+            )
+            st.plotly_chart(fig3, use_container_width=True)
 
     # ── benchmarks ────────────────────────────────────────────────────────────
     st.markdown("---")
@@ -450,7 +481,7 @@ if "resultado" in st.session_state:
     yld_real = (1 + yld_anual) / (1 + ipca_v) - 1
 
     fig4 = go.Figure(go.Bar(
-        x=["IPCA\n(inflação)", "Selic\n(benchmark)", "Yield Bruto\nPortfólio", "Yield Real\nPortfólio"],
+        x=["IPCA\n(inflação)", "Selic\n(benchmark)", "Yield Bruto\nImóveis", "Yield Real\nImóveis"],
         y=[ipca_v*100, selic_v*100, yld_anual*100, yld_real*100],
         marker_color=["#e9c46a", "#4361ee", "#2a9d8f", "#3fb950"],
         text=[f"{v:.1f}%" for v in [ipca_v*100, selic_v*100, yld_anual*100, yld_real*100]],
@@ -461,7 +492,7 @@ if "resultado" in st.session_state:
         template="plotly_dark",
         paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
         yaxis_title="Taxa anual (%)",
-        title="Benchmarks Macroeconômicos vs. Retorno do Portfólio",
+        title="Benchmarks Macroeconômicos vs. Yield dos Imóveis Selecionados",
         showlegend=False, margin=dict(t=60),
     )
     st.plotly_chart(fig4, width='stretch')
